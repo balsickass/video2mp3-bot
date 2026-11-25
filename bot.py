@@ -482,57 +482,105 @@ def fetch_media(m):
         return None, "getfile-rejected", node, kind
     path = info["result"]["file_path"]
 
-    # Resolve where the bytes actually live. Three strategies, tried in order:
-    #   1. read the local file (self-hosted --local server)
-    #   2. HTTP fetch from the local server
-    #   3. HTTP fetch from the public API
-    # Strategy 1 needs PATH TRANSLATION, and that is the whole ballgame: the
-    # server runs in a container with --dir=/var/lib/telegram-bot-api, so it
-    # reports the path as seen INSIDE that container, while this bot runs on the
-    # HOST where the same directory is bind-mounted elsewhere. Without the
-    # translation os.path.exists() is always False, and we silently fall through
-    # to an HTTP fetch that --local mode does not serve -> bare "HTTPError".
+    # Resolve where the bytes actually live. The self-hosted server stores files
+    # as <dir>/<bot>/<file_path> -- note the extra per-bot subdirectory, which is
+    # why a naive os.path.exists(file_path) always misses. It also reports either
+    # an absolute path (as seen INSIDE its container) or a path relative to that
+    # <dir>, and it fetches from the DC lazily, so the file can still be settling
+    # when we look. Hence: candidate locations, polled briefly, then HTTP.
+    # Getting this wrong is what produced a bare "HTTPError" in production.
     data = None
     tried = []
-    if LOCAL_API:
-        cands = []
-        if os.path.isabs(path) and path.startswith(LOCAL_API_DIR):
-            rel = path[len(LOCAL_API_DIR):].lstrip("/")
-            cands.append(os.path.join(LOCAL_API_HOST_DIR, rel))
-        cands.append(path)
+    # Normalise first: the reported path may be absolute (as seen inside the
+    # container) or relative to <dir>, and may or may not already include the
+    # per-bot subdirectory. Strip any known prefix, then re-join against each
+    # root -- blindly joining an absolute path produces a nonsense double path.
+    rel = path.lstrip("/")
+    for base in (LOCAL_API_DIR, LOCAL_API_HOST_DIR):
+        b = base.lstrip("/")
+        if rel.startswith(b + "/"):
+            rel = rel[len(b) + 1:]
+            break
+    want = os.path.basename(path)
+    size_want = node.get("file_size") or 0
+    cands = [path]
+    for base in (LOCAL_API_HOST_DIR, LOCAL_API_DIR):
+        cands.append(os.path.join(base, rel))
+        for sub in (TG_BOT, TG_BOT.split(":")[0]):
+            cands.append(os.path.join(base, sub, rel))
+    for attempt in range(6):
         for c in cands:
-            if os.path.isfile(c):
+            if not os.path.isfile(c):
+                continue
+            try:
+                blob = open(c, "rb").read()
+            except OSError as e:
+                tried.append("read-fail:%s" % type(e).__name__)
+                continue
+            if not blob:
+                continue
+            if size_want and len(blob) != size_want:
+                # a half-written or stale file: keep waiting, don't accept it
+                tried.append("size-mismatch:%d!=%d" % (len(blob), size_want))
+                continue
+            data = blob
+            try:
+                os.unlink(c)  # don't fill the runner's disk
+            except OSError:
+                pass
+            tried.append("disk:%s" % c)
+            break
+        if data:
+            break
+        # Last resort: sweep the mount for that filename (matched by size, so a
+        # leftover file_0.mp4 from an earlier message can't be mistaken for this
+        # one -- the server reuses those names).
+        if LOCAL_API and os.path.isdir(LOCAL_API_HOST_DIR):
+            for root, _dirs, files in os.walk(LOCAL_API_HOST_DIR):
+                if want not in files:
+                    continue
+                p = os.path.join(root, want)
                 try:
-                    with open(c, "rb") as f:
-                        data = f.read()
+                    if size_want and os.path.getsize(p) != size_want:
+                        continue
+                    blob = open(p, "rb").read()
+                except OSError:
+                    continue
+                if blob:
+                    data = blob
                     try:
-                        os.unlink(c)  # don't fill the runner's disk
+                        os.unlink(p)
                     except OSError:
                         pass
-                    tried.append("local-file")
+                    tried.append("sweep:%s" % p)
                     break
-                except OSError as e:
-                    tried.append("local-file-fail:%s" % type(e).__name__)
-        if data is None:
-            tried.append("local-miss")
+            if data:
+                break
+        if attempt < 5:
+            time.sleep(1.5)  # server may still be writing the file out
+    if data is None and LOCAL_API:
+        tried.append("no-local-file-after-6-polls")
     if data is None:
         bases = [API_BASE] + (["https://api.telegram.org"] if LOCAL_API else [])
         for base in bases:
-            url = "%s/file/bot%s/%s" % (base, TG_BOT, path)
-            try:
-                with urllib.request.urlopen(url, timeout=1800) as r:
-                    data = r.read()
-                tried.append("http:%s" % base)
-                break
-            except urllib.error.HTTPError as e:
-                body = ""
+            for u in ("%s/file/bot%s/%s" % (base, TG_BOT, path),
+                      "%s/file/bot%s/%s" % (base, TG_BOT, rel)):
                 try:
-                    body = e.read().decode("utf-8", "replace")[:120]
-                except Exception:
-                    pass
-                tried.append("http:%s=%s %s" % (base, e.code, body))
-            except Exception as e:
-                tried.append("http:%s=%s" % (base, type(e).__name__))
+                    with urllib.request.urlopen(u, timeout=1800) as r:
+                        data = r.read()
+                    tried.append("http:%s" % base)
+                    break
+                except urllib.error.HTTPError as e:
+                    body = ""
+                    try:
+                        body = e.read().decode("utf-8", "replace")[:120]
+                    except Exception:
+                        pass
+                    tried.append("http:%s=%s %s" % (base, e.code, body))
+                except Exception as e:
+                    tried.append("http:%s=%s" % (base, type(e).__name__))
+            if data:
+                break
     if data is None:
         return None, "download-failed[" + " | ".join(tried) + "]", node, kind
 

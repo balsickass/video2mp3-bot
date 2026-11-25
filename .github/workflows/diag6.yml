@@ -1,0 +1,50 @@
+name: diag6
+
+on:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+
+      # Exactly the production startup, entrypoint override included, then the
+      # SHIPPED fetch_media() is run against a real uploaded file.
+      - name: Start server with the entrypoint override and verify the fix
+        env:
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          T: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_API_BASE: "http://localhost:8081"
+          TELEGRAM_LOCAL_HOST_DIR: "/tmp/tapi"
+        run: |
+          set -uo pipefail
+          mkdir -p /tmp/tapi /tmp/telegram-bot-api
+          chmod 777 /tmp/tapi /tmp/telegram-bot-api
+          docker rm -f tapi >/dev/null 2>&1 || true
+          docker run -d --name tapi --network host \
+            --entrypoint telegram-bot-api \
+            -v /tmp/tapi:/var/lib/telegram-bot-api \
+            -e TELEGRAM_API_ID="$TG_API_ID" -e TELEGRAM_API_HASH="$TG_API_HASH" \
+            aiogram/telegram-bot-api:latest \
+            --local --http-port=8081 --dir=/var/lib/telegram-bot-api \
+            --temp-dir=/tmp/telegram-bot-api
+          echo "--- cmdline the container actually runs ---"
+          CMDLINE=$(docker inspect -f '{{join .Config.Cmd " "}}' tapi)
+          echo "$CMDLINE"
+          if echo "$CMDLINE" | grep -q -- "--local"; then
+            echo "✅ --local IS active"
+          else
+            echo "❌ --local STILL MISSING"; exit 1
+          fi
+          for i in $(seq 1 30); do
+            curl -sf --max-time 5 "http://localhost:8081/bot$T/getMe" >/dev/null 2>&1 && {
+              echo "server ready (attempt $i)"; break; }
+            sleep 2
+          done
+          python3 -u tests/probe_download_path.py
