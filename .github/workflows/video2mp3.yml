@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: "*/10 * * * *"
   workflow_dispatch:
+    inputs:
+      run_minutes:
+        description: "shift length in minutes (default 45)"
+        required: false
+        default: "45"
 
 permissions:
   contents: write
@@ -21,6 +26,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
       - name: Ensure ffmpeg (video/audio demux + mp3 encode)
         run: |
           if command -v ffmpeg >/dev/null 2>&1; then
@@ -29,10 +35,51 @@ jobs:
             sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
             echo "ffmpeg installed: $(ffmpeg -version | head -1)"
           fi
+
+      # Telegram's PUBLIC Bot API caps bot downloads at 20 MB and uploads at
+      # 50 MB. A self-hosted server in --local mode raises BOTH to 2000 MB.
+      # If it fails for any reason we fall back to the public API rather than
+      # letting the bot die -- a smaller ceiling beats no bot.
+      - name: Start self-hosted Bot API server (--local, lifts caps to 2000 MB)
+        env:
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          T: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          set -uo pipefail
+          echo "TELEGRAM_API_BASE=https://api.telegram.org" >> "$GITHUB_ENV"
+          if [ -z "${TG_API_ID:-}" ] || [ -z "${TG_API_HASH:-}" ]; then
+            echo "::warning::no api_id/api_hash -- staying on the public API (20 MB cap)"
+            exit 0
+          fi
+          mkdir -p /tmp/tapi && chmod 777 /tmp/tapi
+          docker rm -f tapi >/dev/null 2>&1 || true
+          if ! docker run -d --name tapi --network host \
+                 -v /tmp/tapi:/var/lib/telegram-bot-api \
+                 -e TELEGRAM_API_ID="$TG_API_ID" \
+                 -e TELEGRAM_API_HASH="$TG_API_HASH" \
+                 aiogram/telegram-bot-api:latest \
+                 --local --http-port=8081 --dir=/var/lib/telegram-bot-api; then
+            echo "::warning::could not start local Bot API server -- public API (20 MB)"
+            exit 0
+          fi
+          for i in $(seq 1 30); do
+            if curl -sf --max-time 5 "http://localhost:8081/bot$T/getMe" >/dev/null 2>&1; then
+              echo "✅ local Bot API server READY (attempt $i)"
+              echo "TELEGRAM_API_BASE=http://localhost:8081" >> "$GITHUB_ENV"
+              break
+            fi
+            sleep 2
+          done
+          docker logs tapi 2>&1 | tail -6
+
       - name: Run bot shift
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}
-          RUN_MINUTES: "45"
+          RUN_MINUTES: ${{ github.event.inputs.run_minutes || '45' }}
           WORKFLOW_FILE: "video2mp3.yml"
-        run: python3 bot.py
+        run: |
+          echo "API base in use: ${TELEGRAM_API_BASE:-https://api.telegram.org}"
+          echo "shift minutes  : $RUN_MINUTES"
+          python3 -u bot.py

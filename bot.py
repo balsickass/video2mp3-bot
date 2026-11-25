@@ -20,7 +20,17 @@ HARD RULES (inherited from the voice-stt-bot lineage -- do not regress):
 import json, os, shutil, subprocess, time, urllib.request, urllib.parse, urllib.error
 
 TG_BOT = os.environ["TELEGRAM_BOT_TOKEN"]
-TG = "https://api.telegram.org/bot" + TG_BOT
+# Optional self-hosted Bot API server. Point TELEGRAM_API_BASE at a locally-run
+# telegram-bot-api (--local) and the FILE CAPS CHANGE:
+#     20 MB download  ->  2000 MB
+#     50 MB upload    ->  2000 MB
+# That is the only way to beat the 20 MB getFile limit -- the public API refuses
+# larger files outright and never hands out a file_path, so "download it in
+# parts" is impossible there (there is no URL to range-request).
+API_BASE = os.environ.get("TELEGRAM_API_BASE", "https://api.telegram.org").rstrip("/")
+LOCAL_API = API_BASE != "https://api.telegram.org"
+TG = API_BASE + "/bot" + TG_BOT
+LOCAL_API_DIR = os.environ.get("TELEGRAM_LOCAL_DIR", "/var/lib/telegram-bot-api")
 RUN_MIN = float(os.environ.get("RUN_MINUTES", "45"))
 START = time.time()
 DEADLINE = START + RUN_MIN * 60
@@ -28,10 +38,10 @@ ADMINS = (6592796294, 8439794110)
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
 DEFAULT_SETTINGS = {"delete_original": False, "quality": "high", "send_mode": "audio"}
 
-# Telegram Bot API ceilings -- both are hard, server-side, non-negotiable.
-TG_MAX_DL = 20 * 1024 * 1024          # getFile refuses anything larger
-TG_MAX_UP = 50 * 1024 * 1024          # sendAudio/sendDocument ceiling
-UPLOAD_HEADROOM = 48 * 1024 * 1024    # leave slack for multipart overhead
+# Telegram file ceilings. With a self-hosted --local server these jump to 2000 MB.
+TG_MAX_DL = (2000 if LOCAL_API else 20) * 1024 * 1024
+TG_MAX_UP = (2000 if LOCAL_API else 50) * 1024 * 1024
+UPLOAD_HEADROOM = (1900 if LOCAL_API else 48) * 1024 * 1024
 
 QUALITY = {
     "high":   ["-ac", "2", "-ar", "44100", "-b:a", "192k"],
@@ -299,10 +309,11 @@ def panel_text():
             "Send ANY video or audio: mp4 mkv mov avi webm flv wmv 3gp mpg ts m2ts\n"
             "vob ogv dv m4v mxf asf rm + audio formats + video notes + MP3s\n"
             "(audio is normalised too). Animated GIFs are converted to audio.\n\n"
-            "⚠️ Telegram's Bot API only lets a bot DOWNLOAD 20 MB per file, so\n"
-            "videos must be ≤20 MB. Send back caps at 50 MB (auto-split if over).\n\n"
+            "📥 I can take videos up to %d MB\n"
+            "📤 MP3s come back up to %d MB (auto-split on frame boundaries if longer)\n\n"
             "Settings survive restarts (pushed to the repo)."
-            % (_yn(SETTINGS.get("delete_original")), q, mode))
+            % (_yn(SETTINGS.get("delete_original")), q, mode,
+               TG_MAX_DL // 1048576, TG_MAX_UP // 1048576))
 
 
 def panel_kb():
@@ -466,9 +477,20 @@ def fetch_media(m):
     if not info.get("ok"):
         return None, "getfile-rejected", node, kind
     path = info["result"]["file_path"]
-    url = "https://api.telegram.org/file/bot%s/%s" % (TG_BOT, path)
-    with urllib.request.urlopen(url, timeout=600) as r:
-        data = r.read()
+
+    # Self-hosted --local server: file_path is an ABSOLUTE LOCAL PATH and the
+    # file can be far bigger than 20 MB. Read it straight off disk.
+    if LOCAL_API and os.path.isabs(path) and os.path.exists(path):
+        with open(path, "rb") as f:
+            data = f.read()
+        try:
+            os.unlink(path)  # don't fill the runner's disk across the shift
+        except OSError:
+            pass
+    else:
+        url = "%s/file/bot%s/%s" % (API_BASE, TG_BOT, path)
+        with urllib.request.urlopen(url, timeout=1800) as r:
+            data = r.read()
 
     mime = (node.get("mime_type") or "").lower()
     ext = ""
@@ -503,13 +525,12 @@ def convert_and_send(m):
 
     if oversized(node):
         mb = int(node.get("file_size") or 0) / 1048576.0
+        cap_mb = TG_MAX_DL // 1048576
         try:
             tg("sendMessage", {
                 "chat_id": chat, "reply_to_message_id": mid,
-                "text": ("⚠️ that file is %.1f MB.\n\nTelegram's Bot API only lets a bot "
-                         "download **20 MB** per file — it's a hard server-side limit, not "
-                         "something I can raise 🤷\n\nTrim it under 20 MB (or lower the "
-                         "resolution) and send again." % mb)})
+                "text": ("⚠️ that file is %.1f MB — over my %d MB ceiling.\n\n"
+                         "send me it under %d MB and I'll convert it." % (mb, cap_mb, cap_mb))})
         except Exception:
             pass
         log("too_big", kind, int(node.get("file_size") or 0))
@@ -635,9 +656,13 @@ HELP = ("🎬➡️🎵 **Video → MP3**\n\n"
         "**Accepts:** mp4 mkv mov avi webm flv wmv m4v 3gp 3g2 mpg mpeg ts m2ts "
         "vob ogv dv mxf asf rm — plus video notes, animated GIFs, and every audio "
         "format (also normalised to MP3).\n\n"
-        "⚠️ Telegram caps bot **downloads at 20 MB**, so keep videos under that.\n"
-        "Converted MP3s come back up to 50 MB (auto-split if longer).\n\n"
+        "📥 Videos up to **%d MB** in. MP3s up to **%d MB** back out "
+        "(auto-split if longer).\n\n"
         "Nothing is ever written to disk — media lives in RAM only.")
+
+
+def help_text():
+    return HELP % (TG_MAX_DL // 1048576, TG_MAX_UP // 1048576)
 
 
 def handle(m):
@@ -683,7 +708,7 @@ def handle(m):
         return
     if low.startswith(("/start", "/help")):
         extra = "\n\nAdmin: /panel for toggles." if is_admin(uid) else ""
-        tg("sendMessage", {"chat_id": chat, "text": HELP + extra,
+        tg("sendMessage", {"chat_id": chat, "text": help_text() + extra,
                            "parse_mode": "Markdown",
                            **({"reply_to_message_id": mid} if mid else {})})
         return
