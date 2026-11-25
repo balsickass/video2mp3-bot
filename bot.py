@@ -520,7 +520,38 @@ def fetch_media(m):
         cands.append(os.path.join(base, rel))
         for sub in (TG_BOT, TG_BOT.split(":")[0]):
             cands.append(os.path.join(base, sub, rel))
+    # The server creates <dir>/<bot>/ owned by root with mode 700. This job runs
+    # as `runner`, so it cannot even stat inside that directory: os.walk() yields
+    # nothing and isfile() is always False, so the bytes look absent even though
+    # they are sitting right there. Read them through the container as root
+    # instead -- works at any size and sidesteps the host permission wall.
+    TAPI_C = os.environ.get("TAPI_CONTAINER", "tapi")
+    DEST = os.path.join("/tmp", "v2m_in_" + want)
     for attempt in range(12):
+        if data is None and LOCAL_API and path.startswith("/"):
+            if subprocess.run(["docker", "exec", TAPI_C, "test", "-f", path],
+                              capture_output=True).returncode == 0:
+                subprocess.run(["docker", "cp", "%s:%s" % (TAPI_C, path), DEST],
+                               capture_output=True)
+                try:
+                    blob = open(DEST, "rb").read()
+                except OSError:
+                    blob = b""
+                try:
+                    os.unlink(DEST)
+                except OSError:
+                    pass
+                if blob and (not size_want or len(blob) == size_want):
+                    data = blob
+                    tried.append("docker:%d" % len(blob))
+                elif blob:
+                    tried.append("docker-size:%d!=%d" % (len(blob), size_want))
+                else:
+                    tried.append("docker-copy-failed")
+            elif attempt == 0:
+                tried.append("docker-notfound")
+        if data:
+            break
         for c in cands:
             if not os.path.isfile(c):
                 continue
