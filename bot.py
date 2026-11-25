@@ -572,6 +572,22 @@ def fetch_media(m):
             time.sleep(2.5)  # a 24 MB fetch off a DC is not instant
     if data is None and LOCAL_API:
         tried.append("no-local-file-after-12-polls")
+        # Ground truth: the server only reports file_path once the download has
+        # COMPLETED, so the bytes are definitely somewhere. Dump what is
+        # actually on disk across every mounted root instead of guessing again.
+        try:
+            tree = []
+            for root, _d, files in os.walk(LOCAL_API_HOST_DIR):
+                for fn in files:
+                    p = os.path.join(root, fn)
+                    try:
+                        tree.append("%s(%d)" % (p, os.path.getsize(p)))
+                    except OSError:
+                        tree.append(p)
+            log("tree", "reported=" + str(path), "root=" + LOCAL_API_HOST_DIR,
+                "n=%d" % len(tree), tree[:10])
+        except Exception as e:
+            log("tree_err", type(e).__name__)
     if data is None:
         bases = [API_BASE] + (["https://api.telegram.org"] if LOCAL_API else [])
         for base in bases:
