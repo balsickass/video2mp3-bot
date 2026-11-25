@@ -31,6 +31,10 @@ API_BASE = os.environ.get("TELEGRAM_API_BASE", "https://api.telegram.org").rstri
 LOCAL_API = API_BASE != "https://api.telegram.org"
 TG = API_BASE + "/bot" + TG_BOT
 LOCAL_API_DIR = os.environ.get("TELEGRAM_LOCAL_DIR", "/var/lib/telegram-bot-api")
+# Where that same --dir is bind-mounted on the HOST. The server reports paths as
+# seen inside its container, so these two must be reconciled before any
+# os.path.exists() check -- otherwise every download silently 404s.
+LOCAL_API_HOST_DIR = os.environ.get("TELEGRAM_LOCAL_HOST_DIR", "/tmp/tapi")
 RUN_MIN = float(os.environ.get("RUN_MINUTES", "45"))
 START = time.time()
 DEADLINE = START + RUN_MIN * 60
@@ -478,19 +482,59 @@ def fetch_media(m):
         return None, "getfile-rejected", node, kind
     path = info["result"]["file_path"]
 
-    # Self-hosted --local server: file_path is an ABSOLUTE LOCAL PATH and the
-    # file can be far bigger than 20 MB. Read it straight off disk.
-    if LOCAL_API and os.path.isabs(path) and os.path.exists(path):
-        with open(path, "rb") as f:
-            data = f.read()
-        try:
-            os.unlink(path)  # don't fill the runner's disk across the shift
-        except OSError:
-            pass
-    else:
-        url = "%s/file/bot%s/%s" % (API_BASE, TG_BOT, path)
-        with urllib.request.urlopen(url, timeout=1800) as r:
-            data = r.read()
+    # Resolve where the bytes actually live. Three strategies, tried in order:
+    #   1. read the local file (self-hosted --local server)
+    #   2. HTTP fetch from the local server
+    #   3. HTTP fetch from the public API
+    # Strategy 1 needs PATH TRANSLATION, and that is the whole ballgame: the
+    # server runs in a container with --dir=/var/lib/telegram-bot-api, so it
+    # reports the path as seen INSIDE that container, while this bot runs on the
+    # HOST where the same directory is bind-mounted elsewhere. Without the
+    # translation os.path.exists() is always False, and we silently fall through
+    # to an HTTP fetch that --local mode does not serve -> bare "HTTPError".
+    data = None
+    tried = []
+    if LOCAL_API:
+        cands = []
+        if os.path.isabs(path) and path.startswith(LOCAL_API_DIR):
+            rel = path[len(LOCAL_API_DIR):].lstrip("/")
+            cands.append(os.path.join(LOCAL_API_HOST_DIR, rel))
+        cands.append(path)
+        for c in cands:
+            if os.path.isfile(c):
+                try:
+                    with open(c, "rb") as f:
+                        data = f.read()
+                    try:
+                        os.unlink(c)  # don't fill the runner's disk
+                    except OSError:
+                        pass
+                    tried.append("local-file")
+                    break
+                except OSError as e:
+                    tried.append("local-file-fail:%s" % type(e).__name__)
+        if data is None:
+            tried.append("local-miss")
+    if data is None:
+        bases = [API_BASE] + (["https://api.telegram.org"] if LOCAL_API else [])
+        for base in bases:
+            url = "%s/file/bot%s/%s" % (base, TG_BOT, path)
+            try:
+                with urllib.request.urlopen(url, timeout=1800) as r:
+                    data = r.read()
+                tried.append("http:%s" % base)
+                break
+            except urllib.error.HTTPError as e:
+                body = ""
+                try:
+                    body = e.read().decode("utf-8", "replace")[:120]
+                except Exception:
+                    pass
+                tried.append("http:%s=%s %s" % (base, e.code, body))
+            except Exception as e:
+                tried.append("http:%s=%s" % (base, type(e).__name__))
+    if data is None:
+        return None, "download-failed[" + " | ".join(tried) + "]", node, kind
 
     mime = (node.get("mime_type") or "").lower()
     ext = ""
