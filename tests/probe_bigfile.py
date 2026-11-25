@@ -57,20 +57,19 @@ print("#" * 92)
 print("#  %s" % LABEL)
 print("#" * 92)
 
-if not os.path.exists(SRC):
-    # ~30 MB: clearly over the 20 MB public-API ceiling.
-    subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-                    "-f", "lavfi", "-i", "testsrc=size=1280x720:rate=30:duration=12",
-                    "-c:v", "libx264", "-preset", "ultrafast", "-b:v", "20M",
-                    "-f", "lavfi", "-i", "sine=frequency=440:duration=12",
-                    "-shortest", "-c:a", "aac", SRC], check=True)
+if not os.path.exists(SRC) or os.path.getsize(SRC) < 21 * 1024 * 1024:
+    # ~25 MB of incompressible bytes: over the 20 MB public-API ceiling and it
+    # needs no encoder, so this test cannot fail for an unrelated ffmpeg reason.
+    with open(SRC, "wb") as f:
+        for _ in range(25):
+            f.write(os.urandom(1024 * 1024))
 size = os.path.getsize(SRC)
 print("payload: %d bytes (%.1f MB)  -> %s the 20 MB ceiling"
       % (size, size / 1e6, "OVER" if size > 20e6 else "under"))
 
 try:
     res = (api("sendDocument", {"chat_id": str(CHAT), "caption": LABEL},
-               {"document": ("big30.mp4", open(SRC, "rb").read(), "video/mp4")})
+               {"document": ("big25.bin", open(SRC, "rb").read(), "application/octet-stream")})
            .get("result") or {})
 except Exception as e:
     body = ""
