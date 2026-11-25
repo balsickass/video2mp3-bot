@@ -20,13 +20,33 @@ it to MP3, and sends it back:
 Magic-byte sniffing is used, because Telegram's `mime_type` is frequently
 missing or wrong.
 
-## Hard limits (Telegram-imposed, not fixable in code)
+## File limits — and how they are beaten
 
-- **Download: 20 MB.** `getFile` refuses larger files server-side. Bigger videos
-  get an explicit "trim it under 20 MB" reply.
-- **Upload: 50 MB.** MP3s over 48 MB are auto-split on frame boundaries into
-  `_part1.mp3`, `_part2.mp3`, … A 20 MB video yields a few MB of MP3, so this is
-  rarely reached.
+Telegram's **public** Bot API caps bot downloads at **20 MB** (`getFile` refuses
+larger files server-side and never issues a `file_path`) and uploads at 50 MB.
+
+Because the refusal happens *before any URL exists*, "download the big file in
+parts" is **impossible** on the public API — there is nothing to range-request.
+
+**The fix, and what this bot actually runs:** the workflow starts Telegram's own
+Bot API server in `--local` mode (Docker, `aiogram/telegram-bot-api`), and the bot
+talks to `http://localhost:8081` instead. That raises **both caps to 2000 MB**.
+
+| | public API | self-hosted `--local` |
+|---|---|---|
+| download | 20 MB | **2000 MB** |
+| upload | 50 MB | **2000 MB** |
+
+- `TELEGRAM_API_BASE` selects the endpoint. It **defaults to the public API**, so
+  if Docker or the container fails the shift logs `::warning::` and keeps working
+  with the smaller ceiling — a smaller ceiling beats a dead bot.
+- In `--local` mode `getFile` returns an **absolute local path**; the bot reads it
+  off disk and unlinks it so a shift can't fill the runner.
+- Needs an `api_id`/`api_hash` pair (secrets `TG_API_ID` / `TG_API_HASH`).
+- Readiness is **polled**, never `sleep`-guessed.
+
+MP3s are auto-split on frame boundaries if they somehow exceed the upload cap.
+
 
 ## Design rules (inherited from the voice-stt-bot lineage — do not regress)
 
@@ -70,16 +90,26 @@ naive `pipe:0` path loses the audio (147 B) while the memfd path recovers it
 python3 tests/test_formats.py
 ```
 
-## Liveness check (run from anywhere)
+## Liveness — read this before probing
 
-```
-curl -s -o /dev/null -w '%{http_code}\n' \
-  "https://api.telegram.org/bot$TOKEN/getUpdates?timeout=1"
-```
+**Do NOT check liveness with `getUpdates`.** It is a *destructive* test: a
+competing `getUpdates` does not merely report `409 Conflict` — it **terminates the
+bot's in-flight long-poll**, which the bot logs as `poll_err` and answers with
+exponential backoff. Probing repeatedly kills the thing you're measuring, and the
+resulting silence looks like death, which invites more probing.
 
-`409 Conflict` = a poller is alive (that's the *good* result here).
-`200` repeatedly = **no poller running** — the bot is dead, re-dispatch the
-workflow.
+Measured: 10 probing calls turned into 9x `poll_err HTTPError` in the bot's own
+log. The identical shift with **zero** probing logged a clean 45-second empty
+long-poll and no errors at all.
+
+Safe signals instead:
+
+1. **Send the bot a video** and watch for the MP3. Nothing beats this.
+2. `gh run list -R balsickass/video2mp3-bot` → a run `in_progress`.
+3. The job log: `shift start ...` followed by a long clean gap (the empty
+   long-poll) is healthy; a wall of `poll_err` is not. Note the log only becomes
+   readable **after** the run finishes (`BlobNotFound` while in progress).
+
 
 ## Deploy / restore
 
