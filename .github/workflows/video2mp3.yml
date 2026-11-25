@@ -1,0 +1,38 @@
+name: video2mp3
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: video2mp3
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Ensure ffmpeg (video/audio demux + mp3 encode)
+        run: |
+          if command -v ffmpeg >/dev/null 2>&1; then
+            echo "ffmpeg present: $(ffmpeg -version | head -1)"
+          else
+            sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+            echo "ffmpeg installed: $(ffmpeg -version | head -1)"
+          fi
+      - name: Run bot shift
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          RUN_MINUTES: "45"
+          WORKFLOW_FILE: "video2mp3.yml"
+        run: python3 bot.py
