@@ -1,0 +1,66 @@
+name: diag8
+
+on:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+
+      # PHASE 1 — the documented env var, entrypoint left intact.
+      - name: PHASE 1 - TELEGRAM_LOCAL=1 (no logOut)
+        env:
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          T: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          set -uo pipefail
+          mkdir -p /tmp/tapi && chmod 777 /tmp/tapi
+          docker rm -f tapi >/dev/null 2>&1 || true
+          docker run -d --name tapi --network host \
+            -v /tmp/tapi:/var/lib/telegram-bot-api \
+            -e TELEGRAM_API_ID="$TG_API_ID" \
+            -e TELEGRAM_API_HASH="$TG_API_HASH" \
+            -e TELEGRAM_LOCAL=1 \
+            aiogram/telegram-bot-api:latest
+          sleep 3
+          echo "--- actual cmdline ---"; docker logs tapi 2>&1 | head -5
+          for i in $(seq 1 30); do
+            curl -sf --max-time 5 "http://localhost:8081/bot$T/getMe" >/dev/null 2>&1 && break
+            sleep 2
+          done
+          python3 -u tests/probe_local_env.py "PHASE 1: TELEGRAM_LOCAL=1, no logOut" || true
+          docker logs tapi 2>&1 | tail -15
+
+      # PHASE 2 — the documented one-time migration step, then retest.
+      - name: PHASE 2 - logOut from the public API, then retest
+        env:
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          T: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          set -uo pipefail
+          echo "--- logOut against the public API (one-time migration) ---"
+          curl -s --max-time 30 "https://api.telegram.org/bot$T/logOut" ; echo
+          docker rm -f tapi >/dev/null 2>&1 || true
+          rm -rf /tmp/tapi && mkdir -p /tmp/tapi && chmod 777 /tmp/tapi
+          docker run -d --name tapi --network host \
+            -v /tmp/tapi:/var/lib/telegram-bot-api \
+            -e TELEGRAM_API_ID="$TG_API_ID" \
+            -e TELEGRAM_API_HASH="$TG_API_HASH" \
+            -e TELEGRAM_LOCAL=1 \
+            aiogram/telegram-bot-api:latest
+          sleep 3
+          for i in $(seq 1 30); do
+            curl -sf --max-time 5 "http://localhost:8081/bot$T/getMe" >/dev/null 2>&1 && break
+            sleep 2
+          done
+          python3 -u tests/probe_local_env.py "PHASE 2: TELEGRAM_LOCAL=1 + logOut" || true
+          docker logs tapi 2>&1 | tail -15
