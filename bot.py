@@ -760,9 +760,21 @@ def main():
                                     "allowed_updates": json.dumps(["message", "callback_query"])},
                      timeout=70)
         except Exception as e:
+            # 409 = another poller on the same token; 5xx/timeouts = flaky runner
+            # net. NEVER log just the class name -- an HTTPError's meaning is
+            # entirely in its status code and body, and a bare "HTTPError" sent
+            # me chasing a phantom for 20 minutes. Log the code and the body.
             err = type(e).__name__
+            detail = ""
+            try:
+                if isinstance(e, urllib.error.HTTPError):
+                    detail = "HTTP %s %s" % (e.code, e.read().decode("utf-8", "replace")[:300])
+                else:
+                    detail = ("%s: %s" % (type(e).__name__, e))[:300]
+            except Exception:
+                detail = "(detail unavailable)"
             polls[err] = polls.get(err, 0) + 1
-            log("poll_err", err, polls[err])
+            log("poll_err", detail, polls[err])
             time.sleep(min(2 + polls[err] * 3, 45))
             continue
         polls.clear()

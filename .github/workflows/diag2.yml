@@ -20,7 +20,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}
           RUN_MINUTES: "1"
-          WORKFLOW_FILE: "video2mp3.yml"
+          WORKFLOW_FILE: "no-chain-during-diag.yml"
         run: |
           echo "=== python / ffmpeg ==="
           python3 -V
