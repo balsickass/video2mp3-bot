@@ -1,0 +1,59 @@
+name: diag
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Diagnostics
+        env:
+          T: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          echo "=== env / runtime ==="
+          python3 -V
+          echo "ffmpeg: $(ffmpeg -version 2>/dev/null | head -1 || echo MISSING)"
+          echo
+          echo "=== secret present? (length only, never the value) ==="
+          echo "TELEGRAM_BOT_TOKEN length = ${#T}"
+          echo "first 10 chars: ${T:0:10}"
+          echo
+          echo "=== does that token authenticate? ==="
+          python3 - <<'PY'
+          import os, json, urllib.request, urllib.error, traceback
+          t = os.environ.get("T") or ""
+          print("token length seen by python:", len(t))
+          if not t:
+              print("RESULT: ❌ secret is EMPTY")
+              raise SystemExit(0)
+          try:
+              r = json.loads(urllib.request.urlopen(
+                  "https://api.telegram.org/bot%s/getMe" % t, timeout=25).read())
+              u = r["result"]
+              print("RESULT: ✅ getMe ok -> @%s id=%s" % (u["username"], u["id"]))
+          except urllib.error.HTTPError as e:
+              print("RESULT: ❌ HTTP %s %s" % (e.code, e.read()[:200]))
+          except Exception:
+              print("RESULT: ❌ exception"); traceback.print_exc()
+          # Can this runner long-poll? (409 here = something else is polling)
+          try:
+              urllib.request.urlopen(
+                  "https://api.telegram.org/bot%s/getUpdates?timeout=1" % t, timeout=20)
+              print("getUpdates -> HTTP 200")
+          except urllib.error.HTTPError as e:
+              print("getUpdates -> HTTP %s (409 means another poller is live)" % e.code)
+          except Exception as e:
+              print("getUpdates -> %s" % type(e).__name__)
+          PY
+          echo
+          echo "=== settings.json as committed ==="
+          cat settings.json
+          echo
+          echo "=== workflow files present ==="
+          ls -la .github/workflows/
