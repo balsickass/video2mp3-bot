@@ -58,12 +58,17 @@ print("=" * 88)
 sent = api("sendDocument", {"chat_id": str(CHAT), "caption": "download-path probe"},
            {"document": ("probe.mp4", original, "video/mp4")})
 ok = sent.get("ok")
-doc = (sent.get("result") or {}).get("document") or {}
-mid = (sent.get("result") or {}).get("message_id")
-print("  sendDocument ok=%s  file_id=%s…" % (ok, str(doc.get("file_id"))[:28]))
+_res = (sent.get("result") or {})
+# Telegram PROMOTES a video sent via sendDocument into a `video` node, so the
+# document key can be absent. Accept whichever media node came back.
+doc = (_res.get("document") or _res.get("video") or _res.get("animation")
+       or _res.get("audio") or {})
+mid = _res.get("message_id")
+print("  sendDocument ok=%s  keys=%s" % (ok, [k for k in _res if k != "from"]))
+print("  file_id=%s…" % str(doc.get("file_id"))[:28])
 print("  message_id=%s  (will be deleted at the end)" % mid)
 if not doc:
-    print("  FATAL: no document returned"); print(json.dumps(sent)[:600]); sys.exit(1)
+    print("  FATAL: no media node returned"); print(json.dumps(sent)[:600]); sys.exit(1)
 
 print()
 print("=" * 88)
