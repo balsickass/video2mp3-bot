@@ -520,7 +520,7 @@ def fetch_media(m):
         cands.append(os.path.join(base, rel))
         for sub in (TG_BOT, TG_BOT.split(":")[0]):
             cands.append(os.path.join(base, sub, rel))
-    for attempt in range(6):
+    for attempt in range(12):
         for c in cands:
             if not os.path.isfile(c):
                 continue
@@ -568,10 +568,10 @@ def fetch_media(m):
                     break
             if data:
                 break
-        if attempt < 5:
-            time.sleep(1.5)  # server may still be writing the file out
+        if attempt < 11:
+            time.sleep(2.5)  # a 24 MB fetch off a DC is not instant
     if data is None and LOCAL_API:
-        tried.append("no-local-file-after-6-polls")
+        tried.append("no-local-file-after-12-polls")
     if data is None:
         bases = [API_BASE] + (["https://api.telegram.org"] if LOCAL_API else [])
         for base in bases:

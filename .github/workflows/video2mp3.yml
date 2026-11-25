@@ -52,7 +52,12 @@ jobs:
             echo "::warning::no api_id/api_hash -- staying on the public API (20 MB cap)"
             exit 0
           fi
-          mkdir -p /tmp/tapi && chmod 777 /tmp/tapi
+          # Mount BOTH the data dir and the container's --temp-dir. The image's
+          # entrypoint hardcodes --temp-dir=/tmp/telegram-bot-api; if local-mode
+          # files land there instead of --dir, an unmounted temp dir makes them
+          # invisible to this job no matter how long we poll.
+          mkdir -p /tmp/tgapi/data /tmp/tgapi/tmp
+          chmod -R 777 /tmp/tgapi
           docker rm -f tapi >/dev/null 2>&1 || true
           # TELEGRAM_LOCAL=1 is the CORRECT switch: the image's
           # docker-entrypoint.sh rebuilds the command line and DROPS a --local
@@ -60,7 +65,8 @@ jobs:
           # perfectly healthy. The entrypoint appends --local itself only when
           # this env var is set.
           if ! docker run -d --name tapi --network host \
-                 -v /tmp/tapi:/var/lib/telegram-bot-api \
+                 -v /tmp/tgapi/data:/var/lib/telegram-bot-api \
+                 -v /tmp/tgapi/tmp:/tmp/telegram-bot-api \
                  -e TELEGRAM_API_ID="$TG_API_ID" \
                  -e TELEGRAM_API_HASH="$TG_API_HASH" \
                  -e TELEGRAM_LOCAL=1 \
@@ -80,7 +86,7 @@ jobs:
             if curl -sf --max-time 5 "http://localhost:8081/bot$T/getMe" >/dev/null 2>&1; then
               echo "✅ local Bot API server READY (attempt $i)"
               echo "TELEGRAM_API_BASE=http://localhost:8081" >> "$GITHUB_ENV"
-              echo "TELEGRAM_LOCAL_HOST_DIR=/tmp/tapi" >> "$GITHUB_ENV"
+              echo "TELEGRAM_LOCAL_HOST_DIR=/tmp/tgapi" >> "$GITHUB_ENV"
               break
             fi
             sleep 2
