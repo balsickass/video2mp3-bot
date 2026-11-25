@@ -477,9 +477,21 @@ def fetch_media(m):
     node, kind = _pick_node(m)
     if not node:
         return None, "no-media", None, None
-    info = tg("getFile", {"file_id": node["file_id"]}, timeout=60)
+    try:
+        info = tg("getFile", {"file_id": node["file_id"]}, timeout=60)
+    except urllib.error.HTTPError as e:
+        # getFile raising is how the 20 MB ceiling shows up, and a bare
+        # "HTTPError" tells you nothing. Surface the code and body.
+        body = ""
+        try:
+            body = e.read().decode("utf-8", "replace")[:200]
+        except Exception:
+            pass
+        return None, "getFile HTTP %s %s" % (e.code, body), node, kind
+    except Exception as e:
+        return None, "getFile %s" % type(e).__name__, node, kind
     if not info.get("ok"):
-        return None, "getfile-rejected", node, kind
+        return None, "getfile-rejected %s" % str(info)[:200], node, kind
     path = info["result"]["file_path"]
 
     # Resolve where the bytes actually live. The self-hosted server stores files
