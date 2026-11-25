@@ -52,24 +52,25 @@ jobs:
             echo "::warning::no api_id/api_hash -- staying on the public API (20 MB cap)"
             exit 0
           fi
-          mkdir -p /tmp/tapi /tmp/telegram-bot-api && chmod 777 /tmp/tapi /tmp/telegram-bot-api
+          mkdir -p /tmp/tapi && chmod 777 /tmp/tapi
           docker rm -f tapi >/dev/null 2>&1 || true
-          # --entrypoint override is MANDATORY: the image's docker-entrypoint.sh
-          # rebuilds the command line and silently DROPS --local, which quietly
-          # leaves us on the 20 MB public-API ceiling while looking fine.
+          # TELEGRAM_LOCAL=1 is the CORRECT switch: the image's
+          # docker-entrypoint.sh rebuilds the command line and DROPS a --local
+          # CLI flag, silently leaving us on the 20 MB ceiling while looking
+          # perfectly healthy. The entrypoint appends --local itself only when
+          # this env var is set.
           if ! docker run -d --name tapi --network host \
-                 --entrypoint telegram-bot-api \
                  -v /tmp/tapi:/var/lib/telegram-bot-api \
                  -e TELEGRAM_API_ID="$TG_API_ID" \
                  -e TELEGRAM_API_HASH="$TG_API_HASH" \
-                 aiogram/telegram-bot-api:latest \
-                 --local --http-port=8081 --dir=/var/lib/telegram-bot-api \
-                 --temp-dir=/tmp/telegram-bot-api; then
+                 -e TELEGRAM_LOCAL=1 \
+                 aiogram/telegram-bot-api:latest; then
             echo "::warning::could not start local Bot API server -- public API (20 MB)"
             exit 0
           fi
+          sleep 3
           # Prove --local actually took effect rather than assuming it.
-          CMDLINE=$(docker inspect -f '{{join .Config.Cmd " "}}' tapi)
+          CMDLINE=$(docker logs tapi 2>&1 | grep -m1 "telegram-bot-api --")
           if echo "$CMDLINE" | grep -q -- "--local"; then
             echo "✅ --local confirmed: $CMDLINE"
           else
